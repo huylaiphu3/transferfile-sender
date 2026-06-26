@@ -6,33 +6,35 @@ import java.awt.image.BufferedImage;
 
 public class VisualModemSender extends JFrame {
 
-    private final FrameEncoder encoder;
-    private final int          totalFrames;
+    private final LTEncoder encoder;
 
     private final ImagePanel imagePanel;
-    private final JLabel     lblStatus   = new JLabel("Đang hiệu chỉnh...", SwingConstants.CENTER);
-    private final JLabel     lblProgress = new JLabel("",                   SwingConstants.CENTER);
-    private final JLabel     lblEta      = new JLabel("",                   SwingConstants.CENTER);
+    private final JLabel     lblStatus   = new JLabel("",  SwingConstants.CENTER);
+    private final JLabel     lblProgress = new JLabel("",  SwingConstants.CENTER);
+    private final JLabel     lblEta      = new JLabel("",  SwingConstants.CENTER);
     private final JButton    btnPause    = new JButton("Tạm dừng");
 
     private Timer   timer;
-    private int     currentFrame   = 0;
-    private boolean paused         = false;
-    private boolean calibrating    = true;
-    private int     calibTicks     = 0;
-    private long    startTimeMs    = 0;
+    private int     packetsSent   = 0;
+    private boolean paused        = false;
+    private boolean calibrating   = true;
+    private int     calibTicks    = 0;
+    private long    startTimeMs   = 0;
+
+    // Estimated packets needed: K * 1.15 overhead
+    private int estimatedTotal;
 
     public VisualModemSender(byte[] data, String filename) {
-        super("TransferFile — Visual Modem");
+        super("TransferFile — Visual Modem (LT codes)");
 
         Dimension screen    = Toolkit.getDefaultToolkit().getScreenSize();
         int       blockSize = Math.max(10, Math.min(18, (screen.height - 90) / Protocol.ROWS));
 
-        this.encoder     = new FrameEncoder(data, filename, blockSize);
-        this.totalFrames = encoder.totalFrames;
+        this.encoder        = new LTEncoder(data, filename, blockSize);
+        this.estimatedTotal = (int)(encoder.K * 1.15);
 
-        int gridPx  = Protocol.COLS * blockSize;
-        imagePanel  = new ImagePanel(gridPx);
+        int gridPx = Protocol.COLS * blockSize;
+        imagePanel = new ImagePanel(gridPx);
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         buildLayout();
@@ -44,14 +46,12 @@ public class VisualModemSender extends JFrame {
         setBackground(Color.BLACK);
         setLayout(new BorderLayout(0, 0));
 
-        // Grid centered on black background
         JPanel center = new JPanel(new GridBagLayout());
         center.setBackground(Color.BLACK);
         center.add(imagePanel);
         add(center, BorderLayout.CENTER);
 
-        // Status bar
-        Font mono  = new Font(Font.MONOSPACED, Font.PLAIN, 12);
+        Font mono = new Font(Font.MONOSPACED, Font.PLAIN, 12);
         lblStatus  .setFont(mono); lblStatus  .setForeground(Color.WHITE);
         lblProgress.setFont(mono); lblProgress.setForeground(new Color(0, 220, 220));
         lblEta     .setFont(mono); lblEta     .setForeground(new Color(220, 220, 0));
@@ -71,8 +71,9 @@ public class VisualModemSender extends JFrame {
     }
 
     public void startTransmission() {
-        imagePanel.show(encoder.encodeCalibration());
-        lblStatus.setText("Mở receiver/index.html trên điện thoại — hiệu chỉnh 5 giây");
+        imagePanel.show(encoder.calibrationFrame());
+        lblStatus.setText(String.format(
+            "K = %d blocks | Mở receiver trên điện thoại — hiệu chỉnh 5 giây", encoder.K));
         timer = new Timer(Protocol.FRAME_DELAY_MS, e -> tick());
         timer.start();
     }
@@ -82,52 +83,43 @@ public class VisualModemSender extends JFrame {
 
         if (calibrating) {
             if (++calibTicks >= Protocol.CALIBRATION_TICKS) {
-                calibrating  = false;
-                startTimeMs  = System.currentTimeMillis();
-                currentFrame = 0;
+                calibrating = false;
+                startTimeMs = System.currentTimeMillis();
             }
             return;
         }
 
-        int idx = currentFrame % totalFrames;
-        imagePanel.show(encoder.encodeFrame(idx));
+        imagePanel.show(encoder.nextFrame());
+        packetsSent++;
 
-        int    pass    = currentFrame / totalFrames + 1;
-        double pct     = (idx * 100.0) / totalFrames;
+        double pct     = Math.min(100.0, packetsSent * 100.0 / estimatedTotal);
         long   elapsed = System.currentTimeMillis() - startTimeMs;
-        String eta     = buildEta(idx, elapsed);
+        String eta     = buildEta(elapsed);
 
-        lblStatus  .setText(String.format("Vòng %d  |  Frame %d / %d", pass, idx + 1, totalFrames));
+        lblStatus  .setText(String.format("Đã gửi %d packet  (cần ~%d)", packetsSent, estimatedTotal));
         lblProgress.setText(String.format("%.1f%%", pct));
         lblEta     .setText(eta);
-
-        currentFrame++;
     }
 
-    private String buildEta(int idx, long elapsedMs) {
-        if (idx == 0 || elapsedMs < 500) return "";
-        double msPerFrame = (double) elapsedMs / currentFrame;
-        double remainMs   = msPerFrame * (totalFrames - idx);
-        if (remainMs < 60_000)
-            return String.format("còn ~%.0f giây", remainMs / 1000);
-        return String.format("còn ~%.1f phút", remainMs / 60_000);
+    private String buildEta(long elapsedMs) {
+        if (packetsSent < 5 || elapsedMs < 500) return "";
+        double msPerPkt   = (double) elapsedMs / packetsSent;
+        double remaining  = msPerPkt * Math.max(0, estimatedTotal - packetsSent);
+        if (remaining < 60_000) return String.format("còn ~%.0f giây", remaining / 1000);
+        return String.format("còn ~%.1f phút", remaining / 60_000);
     }
 
-    // ── Inner panel ─────────────────────────────────────────────────────────
+    // ── Inner panel ───────────────────────────────────────────────────────────
 
     private static class ImagePanel extends JPanel {
         private BufferedImage image;
         private final int     size;
 
-        ImagePanel(int size) {
-            this.size = size;
-            setBackground(Color.BLACK);
-        }
+        ImagePanel(int size) { this.size = size; setBackground(Color.BLACK); }
 
         void show(BufferedImage img) { this.image = img; repaint(); }
 
-        @Override
-        protected void paintComponent(Graphics g) {
+        @Override protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             if (image != null) g.drawImage(image, 0, 0, null);
         }
