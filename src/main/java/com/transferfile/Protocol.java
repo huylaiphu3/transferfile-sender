@@ -3,8 +3,8 @@ package com.transferfile;
 public final class Protocol {
     private Protocol() {}
 
-    public static final int COLS = 64;
-    public static final int ROWS = 64;
+    public static final int COLS = 80;
+    public static final int ROWS = 80;
 
     public static final int SYNC_ROW         = 0;
     public static final int HEADER_ROW_START = 1;
